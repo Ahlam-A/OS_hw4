@@ -3,7 +3,7 @@
 #include <cstring>
 #include <iostream>
 #include <sys/mman.h>
-
+#include "os_malloc.h"
 
 #define MIN_SIZE 0
 #define MAX_SIZE 100000000
@@ -15,7 +15,8 @@ typedef struct MetaData_t {
     void* alloc_address;
     size_t alloc_size;
     bool is_free;
-    MetaData_t* next, prev;
+    struct MetaData_t* next;
+    struct MetaData_t* prev;
 } *MetaData;
 
 MetaData memory_list = nullptr;
@@ -35,14 +36,14 @@ void* smalloc(size_t size) {
     }
 
     // If not enough free space was found, allocate new memory
-    MetaData metaData = (MetaData)sbrk(sizeof(*MetaData));
+    MetaData metaData = (MetaData)sbrk(sizeof(*metaData));
     if (metaData == (void*)(-1)) {
         return nullptr;
     }
 
     void* alloc_addr = sbrk(size);
     if (alloc_addr == (void*)(-1)) {
-        sbrk(-sizeof(*MetaData));
+        sbrk(-sizeof(*metaData));
         return nullptr;
     }
 
@@ -188,7 +189,7 @@ size_t _num_allocated_bytes() {
 }
 
 size_t _size_meta_data() {
-    return sizeof(*MetaData);
+    return sizeof(struct MetaData_t);
 }
 
 size_t _num_meta_data_bytes() {
