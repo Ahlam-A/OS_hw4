@@ -3,13 +3,12 @@
 #include <cstring>
 #include <iostream>
 #include <sys/mman.h>
-
+#include "os_malloc.h"
 
 #define MIN_SIZE 0
 #define MAX_SIZE 100000000
 #define SPLIT_MIN 128
 #define LARGE_ALLOC 128 * 1024
-
 
 using std::memset;
 using std::memcpy;
@@ -18,19 +17,19 @@ typedef struct MetaData_t {
     void* alloc_address;
     size_t alloc_size;
     bool is_free;
-    MetaData_t* next, prev;
+    struct MetaData_t* next;
+    struct MetaData_t* prev;
 } *MetaData;
-
 
 MetaData memory_list = nullptr;
 
-/* =============== Declarations ================ */
+/* =================== Declarations ==================== */
 
 size_t _size_meta_data();
 void* map_smalloc(size_t size);
 void* map_srealloc(void* oldp,size_t size);
 
-/* ============= Helper Functions ============== */
+/* ================= Helper Functions ================== */
 
 void split(MetaData metaData, size_t requested_size) {
     size_t md_size = _size_meta_data();
@@ -56,11 +55,31 @@ void split(MetaData metaData, size_t requested_size) {
 }
 
 void merge(MetaData metaData) {
-    
+    size_t md_size = _size_meta_data();
+
+    // Merge with next block if it's free
+    MetaData next_block = metaData->next;
+    if (next_block != nullptr && next_block->is_free) {
+        metaData->alloc_size += next_block->alloc_size + md_size;
+        metaData->next = next_block->next;
+        if (next_block->next != nullptr) {
+            next_block->next->prev = metaData;
+        }
+    }
+
+    // Merge with previous block if it's free
+    MetaData prev_block = metaData->prev;
+    if (prev_block != nullptr && prev_block->is_free) {
+        prev_block->alloc_size += metaData->alloc_size + md_size;
+        prev_block->next = metaData->next;
+
+        if (metaData->next != nullptr) {
+            metaData->next->prev = prev_block;
+        }
+    }
 }
 
-
-/* ============= Upgraded Functions ============= */
+/* ================ Upgraded Functions ================= */
 
 void* smalloc(size_t size) {
     if (size <= MIN_SIZE || size > MAX_SIZE) 
@@ -78,14 +97,14 @@ void* smalloc(size_t size) {
     }
 
     // If not enough free space was found, allocate new memory
-    MetaData metaData = (MetaData)sbrk(sizeof(*MetaData));
+    MetaData metaData = (MetaData)sbrk(sizeof(*metaData));
     if (metaData == (void*)(-1)) {
         return nullptr;
     }
 
     void* alloc_addr = sbrk(size);
     if (alloc_addr == (void*)(-1)) {
-        sbrk(-sizeof(*MetaData));
+        sbrk(-sizeof(*metaData));
         return nullptr;
     }
 
@@ -139,6 +158,7 @@ void sfree(void* p) {
             // Else, free the allocated block
             else {
                 md->is_free = true;
+                merge(md);
                 return;
             }
         }
@@ -231,7 +251,7 @@ size_t _num_allocated_bytes() {
 }
 
 size_t _size_meta_data() {
-    return sizeof(*MetaData);
+    return sizeof(struct MetaData_t);
 }
 
 size_t _num_meta_data_bytes() {
