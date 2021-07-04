@@ -92,6 +92,18 @@ void* smalloc(size_t size) {
                 md->is_free = false;
                 split(md, size);
                 return md->alloc_address;
+            }        
+            
+            // Check if wilderness chunck is free
+            if (md->next == nullptr && md->is_free) {
+                void* enlarge = sbrk(size - md->alloc_size);
+                if (enlarge == (void*)(-1)) {
+                    sbrk(md->alloc_size - size);
+                    return nullptr;
+                }
+                md->alloc_size = size;
+                md->is_free = false;
+                return md->alloc_address;
             }
         }
     }
@@ -123,7 +135,6 @@ void* smalloc(size_t size) {
         while (md->next) {
             md = md->next;
         }
-
         metaData->prev = md;
         md->next = metaData;
     }
