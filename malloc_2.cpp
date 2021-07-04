@@ -11,95 +11,72 @@
 using std::memset;
 using std::memcpy;
 
-class MetaData {
-     
-    bool _is_free;
-    size_t _original_size;
-    size_t _requested_size;
-    void* _allocation_addr;
-    MetaData* _next;
-    MetaData* _prev;
+typedef struct MetaData_t { 
+    void* alloc_address;
+    size_t alloc_size;
+    bool is_free;
+    MetaData_t* next, prev;
+} *MetaData;
 
-public:
-
-    void set_is_free(bool free) {_is_free = free;}
-    void set_original_size(size_t size) {_original_size = size;}
-    void set_requested_size(size_t size) {_requested_size = size;}
-    void set_allocation_addr(void *addr) {_allocation_addr = addr;}
-    void set_next(MetaData* next) {_next = next;}
-    void set_prev(MetaData* prev) {_prev = prev;}
-    bool is_free() {return _is_free;}
-    size_t get_original_size() {return _original_size;}
-    size_t get_requested_size() {return _requested_size;}
-    void* get_allocation_addr() {return _allocation_addr;}
-    MetaData* get_next() {return _next;}
-    MetaData* get_prev() {return _prev;}
-};
-
-MetaData* allocHistory = NULL;
+MetaData memory_list = nullptr;
 
 void* smalloc(size_t size) {
     if (size <= MIN_SIZE || size > MAX_SIZE) 
-        return NULL;
+        return nullptr;
 
-    // First, search for free space in our global list
-    if (allocHistory) {
-        for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
-            if (iter->get_original_size() >= size && iter->is_free()) {
-                iter->set_is_free(false);
-                iter->set_requested_size(size);
-                return iter->get_allocation_addr();
+    // First, search for free space in memory list
+    if (memory_list) {
+        for (MetaData md = memory_list; md != nullptr; md = md->next) {
+            if (md->is_free && md->alloc_size >= size) {
+                md->is_free = false;
+                return md->alloc_address;
             }
         }
     }
 
-    // If not enough free space was found, allocate new space
-    MetaData* metaData = (MetaData*)sbrk(sizeof(MetaData));
+    // If not enough free space was found, allocate new memory
+    MetaData metaData = (MetaData)sbrk(sizeof(*MetaData));
     if (metaData == (void*)(-1)) {
-        return NULL;
+        return nullptr;
     }
 
-    void* allocation_addr = sbrk(size);
-    if (allocation_addr == (void*)(-1)) {
-        sbrk(-sizeof(MetaData));
-        return NULL;
+    void* alloc_addr = sbrk(size);
+    if (alloc_addr == (void*)(-1)) {
+        sbrk(-sizeof(*MetaData));
+        return nullptr;
     }
 
-    metaData->set_is_free(false);
-    metaData->set_original_size(size);
-    metaData->set_requested_size(size);
-    metaData->set_allocation_addr(allocation_addr);
-    metaData->set_next(NULL);
-    metaData->set_prev(NULL);
+    metaData->alloc_address = alloc_addr;
+    metaData->alloc_size = size;
+    metaData->is_free = false;
+    metaData->next = metaData->prev = nullptr;
 
-    // Add the allocated meta-data to the allocation history list
-    // If this it the first allocation:
-    if (!allocHistory) {
-        allocHistory = metaData;
+    // Add the allocated meta-data to memory list
+    if (!memory_list) {
+        memory_list = metaData;
     }
-    
-    // Else if there are others, we need to find the last allocation made
+
     else {
-        MetaData* iter = allocHistory;
-        while (iter->get_next()) {
-            iter = iter->get_next();
+        MetaData md = memory_list;
+        while (md->next) {
+            md = md->next;
         }
 
-        metaData->set_prev(iter);
-        iter->set_next(metaData);
+        metaData->prev = md;
+        md->next = metaData;
     }
 
-    return allocation_addr;
+    return alloc_addr;
 }
 
 void* scalloc(size_t num, size_t size) {
-    // First, we allocate memory using smalloc
+    // First, allocate memory using smalloc
     void* alloc_addr = smalloc(num * size);
 
     if (!alloc_addr) 
-        return NULL;
+        return nullptr;
 
-    // Then, if we succeed in allocating, we reset the block
+    // Then, if allocation succeeds, reset the block
     else 
         return memset(alloc_addr, 0, num * size);
     
@@ -109,16 +86,16 @@ void sfree(void* p) {
     if (!p) 
         return;
 
-    // Search for p in our global list
-    for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
-        if (iter->get_allocation_addr() == p) {
+    // Search for p in memory list
+    for (MetaData md = memory_list; md != nullptr; md = md->next) {
+        if (md->alloc_address == p) {
             // If 'p' has already been freed, don't do anything
-            if (iter->is_free()) {
+            if (md->is_free) {
                 return;
             }
             // Else, free the allocated block
             else {
-                iter->set_is_free(true);
+                md->is_free = true;
                 return;
             }
         }
@@ -127,52 +104,50 @@ void sfree(void* p) {
 
 void* srealloc(void* oldp, size_t size) {
     if (size <= MIN_SIZE || size > MAX_SIZE) 
-        return NULL;
+        return nullptr;
 
-    // If oldp is NULL, allocate memory for 'size' bytes and return a poiter to it
+    // If oldp is null, allocate memory for 'size' bytes and return a pointer to it
     if (!oldp) {
-        void* allocation_addr = smalloc(size);
-        if (!allocation_addr) 
-            return NULL;
-        
+        void* alloc_addr = smalloc(size);
+        if (!alloc_addr) 
+            return nullptr;
         else 
-            return allocation_addr; 
+            return alloc_addr; 
     }
 
     // If not, search for it assuming oldp is a pointer to a previously allocated block
-    MetaData* metaData = NULL;
-    for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
-        if (iter->get_allocation_addr() == oldp) {
-            metaData = iter;
+    MetaData metaData = nullptr;
+    for (MetaData md = memory_list; md != nullptr; md = md->next) {
+        if (md->alloc_address == oldp) {
+            metaData = md;
             break;
         }
     }
 
     // Check if allocation has enough memory to support the new block size
-    if (metaData->get_original_size() >= size) {
-        metaData->set_requested_size(size);
+    if (metaData->alloc_size >= size) {
         return oldp;
     }
     
     // If not, allocate memory using smalloc
     else {
-        void* allocation_addr = smalloc(size);
-        if (!allocation_addr) 
-            return NULL;
+        void* alloc_addr = smalloc(size);
+        if (!alloc_addr) 
+            return nullptr;
         
         // Copy the data, then free the old memory using sfree
-        memcpy(allocation_addr, oldp, size);
+        memcpy(alloc_addr, oldp, size);
         sfree(oldp);
-        return allocation_addr;
+        return alloc_addr;
     }
 }
 
 
 size_t _num_free_blocks() {
     size_t free_blocks = 0;
-    if (allocHistory) {
-        for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
-            if (iter->is_free()) {
+    if (memory_list) {
+        for (MetaData md = memory_list; md != nullptr; md = md->next) {
+            if (md->is_free) {
                 free_blocks++;
             }
         }
@@ -182,10 +157,10 @@ size_t _num_free_blocks() {
 
 size_t _num_free_bytes() {
     size_t free_bytes = 0;
-    if (allocHistory) {
-        for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
-            if (iter->is_free()) {
-                free_bytes += iter->get_original_size();
+    if (memory_list) {
+        for (MetaData md = memory_list; md != nullptr; md = md->next) {
+            if (md->is_free) {
+                free_bytes += md->alloc_size;
             }
         }
     }
@@ -194,8 +169,8 @@ size_t _num_free_bytes() {
 
 size_t _num_allocated_blocks() {
     size_t allocated_blocks = 0;
-    if (allocHistory) {
-        for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
+    if (memory_list) {
+        for (MetaData md = memory_list; md != nullptr; md = md->next) {
             allocated_blocks++;
         }
     }
@@ -204,16 +179,16 @@ size_t _num_allocated_blocks() {
 
 size_t _num_allocated_bytes() {
     size_t allocated_bytes = 0;
-    if (allocHistory) {
-        for (MetaData* iter = allocHistory; iter != nullptr; iter = iter->get_next()) {
-            allocated_bytes += iter->get_original_size();
+    if (memory_list) {
+        for (MetaData md = memory_list; md != nullptr; md = md->next) {
+            allocated_bytes += md->alloc_size;
         }
     }
     return allocated_bytes;
 }
 
 size_t _size_meta_data() {
-    return sizeof(MetaData);
+    return sizeof(*MetaData);
 }
 
 size_t _num_meta_data_bytes() {
