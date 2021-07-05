@@ -9,7 +9,7 @@
 #define MAX_SIZE 100000000
 
 using std::memset;
-using std::memcpy;
+using std::memmove;
 
 typedef struct MetaData_t { 
     void* alloc_address;
@@ -137,7 +137,7 @@ void* srealloc(void* oldp, size_t size) {
             return nullptr;
         
         // Copy the data, then free the old memory using sfree
-        memcpy(alloc_addr, oldp, size);
+        memmove(alloc_addr, oldp, metaData->alloc_size);
         sfree(oldp);
         return alloc_addr;
     }
