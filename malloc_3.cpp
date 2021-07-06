@@ -3,31 +3,29 @@
 #include <cstring>
 #include <iostream>
 #include <sys/mman.h>
-#include "os_malloc.h"
 
 #define MIN_SIZE 0
 #define MAX_SIZE 100000000
 #define SPLIT_MIN 128
 #define KB 1024
 #define LARGE_ALLOC 128 * KB
-#define MD_SIZE _size_meta_data()
+#define MD_SIZE sizeof(MetaData)
 
 using std::memset;
 using std::memmove;
 
-typedef struct MetaData_t { 
-    void* alloc_address;
-    size_t alloc_size;
+struct MetaData { 
+    size_t size;
     bool is_free;
-    struct MetaData_t* next;
-    struct MetaData_t* prev;
-    struct MetaData_t* next_free;
-    struct MetaData_t* prev_free;
-} *MetaData;
+    MetaData* next;
+    MetaData* prev;
+    MetaData* next_free;
+    MetaData* prev_free;
+};
 
-MetaData memory_list = nullptr;
-MetaData mmap_list = nullptr;
-MetaData histogram[128];
+MetaData* memory_list = nullptr;
+MetaData* mmap_list = nullptr;
+MetaData* histogram[128];
 
 /* ================= Helper Functions ================== */
 
@@ -42,22 +40,22 @@ int histIndex (size_t size) {
     return i-1;
 }
 
-void histRemove(Metadata md){
-    if (md->next_free != nullptr) {
-        md->next_free->prev_free = md->prev_free;
-    }
+void histRemove(MetaData* md){
     if (md->prev_free != nullptr) {
         md->prev_free->next_free = md->next_free;
     } else {
-        int index = histIndex(md->alloc_size);
+        int index = histIndex(md->size);
         histogram[index] = md->next_free;
+    }
+    if (md->next_free != nullptr) {
+        md->next_free->prev_free = md->prev_free;
     }
     md->next_free = md->prev_free = nullptr;
 }
 
-void histInsert (Metadata md) {
-    int index = histIndex(md->alloc_size);
-    MetaData slot = histogram[index];
+void histInsert (MetaData* md) {
+    int index = histIndex(md->size);
+    MetaData* slot = histogram[index];
     
     if (slot == nullptr) {
         histogram[index] = md;
@@ -65,14 +63,14 @@ void histInsert (Metadata md) {
     }
     else {
         bool is_inserted = false;
-        MetaData current = slot;
+        MetaData* current = slot;
         while (slot != nullptr) {
-            if (slot->alloc_size >= md->alloc_size) {
+            if (slot->size >= md->size) {
                 if (slot->prev_free == nullptr) {
                     histogram[index] = md;
-                    slot->prev_free = md;
                     md->next_free = slot;
                     md->prev_free = nullptr;
+                    slot->prev_free = md;
                     is_inserted = true ;
                     break;
                 }
@@ -96,35 +94,31 @@ void histInsert (Metadata md) {
     }
 }
 
-void split(MetaData metaData, size_t requested_size) {
-    size_t split_size = metaData->alloc_size - requested_size - MD_SIZE;
-    if (split_size < SPLIT_MIN) {
+void split(MetaData* metaData, size_t requested_size) {
+    if(metaData->size - requested_size < SPLIT_MIN + MD_SIZE) {
         return;
     }
 
-    MetaData newMataData = (MetaData)((size_t)metaData + MD_SIZE + requested_size);
-    newMataData->alloc_address = (void*)((size_t)newMataData + MD_SIZE);
-    newMataData->alloc_size = split_size;
+    MetaData* newMataData = (MetaData*)((size_t)metaData + MD_SIZE + requested_size);
+    newMataData->size = metaData->size - requested_size - MD_SIZE;
     newMataData->is_free = true;
-
-    histInsert(newMataData);
-
     newMataData->prev = metaData;
     newMataData->next = metaData->next;
-    if (newMataData->next) {
+    if (newMataData->next != nullptr) {
         newMataData->next->prev = newMataData;
     }
+    metaData->size = requested_size;
     metaData->next = newMataData;
-    metaData->alloc_size = requested_size;
+    histInsert(newMataData);
 }
 
-void merge(MetaData metaData) {
+void merge(MetaData* metaData) {
     // Merge with next block if it's free
-    MetaData next_block = metaData->next;
+    MetaData* next_block = metaData->next;
     if (next_block != nullptr && next_block->is_free) {
         histRemove(metaData);
         histRemove(next_block);
-        metaData->alloc_size += next_block->alloc_size + MD_SIZE;
+        metaData->size += next_block->size + MD_SIZE;
         metaData->next = next_block->next;
         if (next_block->next != nullptr) {
             next_block->next->prev = metaData;
@@ -133,11 +127,11 @@ void merge(MetaData metaData) {
     }
 
     // Merge with previous block if it's free
-    MetaData prev_block = metaData->prev;
+    MetaData* prev_block = metaData->prev;
     if (prev_block != nullptr && prev_block->is_free) {
         histRemove(prev_block);
         histRemove(metaData);
-        prev_block->alloc_size += metaData->alloc_size + MD_SIZE;
+        prev_block->size += metaData->size + MD_SIZE;
         prev_block->next = metaData->next;
         if (metaData->next != nullptr) {
             metaData->next->prev = prev_block;
@@ -153,9 +147,8 @@ void* mmap_smalloc(size_t size) {
     if (mm_block == MAP_FAILED) 
         return nullptr;
     
-    MetaData metaData = (MetaData)mm_block;
-    metaData->alloc_address = mm_block + MD_SIZE;
-    metaData->alloc_size = size;
+    MetaData* metaData = (MetaData*)mm_block;
+    metaData->size = size;
     metaData->is_free = false;
 
     // Insert new block to mmap_list
@@ -164,7 +157,7 @@ void* mmap_smalloc(size_t size) {
         metaData->next = metaData->prev = nullptr;
     }
     else {
-        MetaData md = mmap_list;
+        MetaData* md = mmap_list;
         while (md->next) {
             md = md->next;
         }
@@ -172,28 +165,29 @@ void* mmap_smalloc(size_t size) {
         md->next = metaData;
     }
 
-    return metaData->alloc_address;
+    return metaData + 1;
 }
 
 void* mmap_srealloc(void* oldp, size_t size) {
-    // Search for oldp assuming it points to a previously allocated block in mmap_list
-    MetaData old_md = nullptr;
-    for (MetaData md = mmap_list; md != nullptr; md = md->next) {
-        if (md->alloc_address == oldp) {
-            old_md = md;
-            break;
-        }
-    }
+    MetaData* old_md = (MetaData*)oldp - 1;
 
-    // Reallocate memory for new size and free old block
+    // Remove old block from mmap list
+    if (old_md->next != nullptr) {
+         old_md->next->prev = old_md->prev;
+    }
+    if (old_md->prev != nullptr) {
+        old_md->prev->next = old_md->next;
+    } else {
+        mmap_list = old_md->next;
+    }
+    // Reallocate memory for new size and free old block 
     void* newp = mmap_smalloc(size);
-    if (size < old_md->alloc_size) {
+    if (size < old_md->size) {
         memmove(newp, oldp, size);
     } else {
         memmove(newp, oldp, old_md->size);
     }
-    sfree(old_md);
-
+    munmap(oldp, old_md->size + MD_SIZE);
     return newp;
 }
 
@@ -209,51 +203,43 @@ void* smalloc(size_t size) {
     // First, search for free space in memory list
     if (memory_list) {
         // Check if histogram has a free block with enough space
-        int index = histIndex(size);
-        for (int i = index; i < 128; i++) {
-            MetaData md = histogram[i];
+        for (int i = histIndex(size); i < 128; i++) {
+            MetaData* md = histogram[i];
             while (md != nullptr) {
-                if (md->alloc_size >= size) {
+                if (md->size >= size) {
                     md->is_free = false;
                     histRemove(md);
                     split(md, size);
-                    return md->alloc_address;
+                    return md + 1;
                 }
-                md = md->next;
+                md = md->next_free;
             }       
         }
 
         // Check if wilderness chunck is free
-        MetaData md = memory_list;
-        while (md->next) {
-            md = md->next;
+        MetaData* wild = memory_list;
+        while (wild->next) {
+            wild = wild->next;
         }
-        if (md->is_free) {
-            void* enlarge = sbrk(size - md->alloc_size);
+        if (wild->is_free /*true dat*/) {
+            histRemove(wild);
+            wild->is_free = false; //bummer
+            void* enlarge = sbrk(size - wild->size);
             if (enlarge == (void*)(-1))
                 return nullptr;
             
-            md->alloc_size = size;
-            md->is_free = false;
-            histRemove(md);
-            return md->alloc_address;
+            wild->size = size;
+            return wild + 1;
         }
     }
 
     // If not enough free space was found, allocate new memory
-    MetaData metaData = (MetaData)sbrk(sizeof(*metaData));
+    MetaData* metaData = (MetaData*)sbrk(size + sizeof(MetaData));
     if (metaData == (void*)(-1)) {
         return nullptr;
     }
 
-    void* alloc_addr = sbrk(size);
-    if (alloc_addr == (void*)(-1)) {
-        sbrk(-sizeof(*metaData));
-        return nullptr;
-    }
-
-    metaData->alloc_address = alloc_addr;
-    metaData->alloc_size = size;
+    metaData->size = size;
     metaData->is_free = false;
     metaData->next = metaData->prev = nullptr;
 
@@ -262,15 +248,15 @@ void* smalloc(size_t size) {
         memory_list = metaData;
     }
     else {
-        MetaData md = memory_list;
-        while (md->next) {
-            md = md->next;
+        MetaData* last = memory_list;
+        while (last->next) {
+            last = last->next;
         }
-        metaData->prev = md;
-        md->next = metaData;
+        last->next = metaData;
+        metaData->prev = last;
     }
 
-    return alloc_addr;
+    return metaData + 1;
 }
 
 void* scalloc(size_t num, size_t size) {
@@ -287,47 +273,28 @@ void* scalloc(size_t num, size_t size) {
 }
 
 void sfree(void* p) {
-    if (!p) 
-        return;
+    if (!p) return;
+    
+    MetaData* md = (MetaData*)p - 1;
+    if (md->is_free) return;
 
-    // Search for p in memory list
-    for (MetaData md = memory_list; md != nullptr; md = md->next) {
-        if (md->alloc_address == p) {
-            // If 'p' has already been freed, don't do anything
-            if (md->is_free) {
-                return;
-            }
-            // Else, free the allocated block and insert to histogram
-            else {
-                histInsert(md);
-                merge(md);
-                md->is_free = true;
-                return;
-            }
-        }
+    // If p is in memory_list, add the allocated block to free histogram
+    else if (md->size < LARGE_ALLOC) {
+        md->is_free = true; 
+        histInsert(md);
+        merge(md);
     }
-
-    // Search for p in mmap list
-    for (MetaData md = mmap_list; md != nullptr; md = md->next) {
-        if (md->alloc_address == p) {
-            // If 'p' has already been freed, don't do anything
-            if (md->is_free) {
-                return;
-            }
-            // Else, free the allocated block using munmap
-            else {
-                if (md->next != nullptr) {
-                    md->next->prev = md->prev;
-                }
-                if (md->prev != nullptr) {
-                    md->prev->next = md->next;
-                } else {
-                    mmap_list = md->next;
-                }
-                munmap(p, md->size + MD_SIZE);
-                return;
-            }
+    // Else if p is in mmap_list, free the allocated block using munmap
+    else {
+        if (md->next != nullptr) {
+            md->next->prev = md->prev;
         }
+        if (md->prev != nullptr) {
+            md->prev->next = md->next;
+        } else {
+            mmap_list = md->next;
+        }
+        munmap(p, md->size + MD_SIZE);
     }
 }
 
@@ -336,65 +303,52 @@ void* srealloc(void* oldp, size_t size) {
         return nullptr;
 
     // If oldp is null, allocate memory for 'size' bytes and return a pointer to it
-    if (!oldp) {
-        void* alloc_addr = smalloc(size);
-        if (!alloc_addr) 
-            return nullptr;
-        else 
-            return alloc_addr; 
-    }
+    if (oldp == nullptr) return smalloc(size);
 
-    if (size >= LARGE_ALLOC)
-        return mmap_smalloc(size);
+    if (size >= LARGE_ALLOC) return mmap_srealloc(oldp, size);
 
-    // Search for oldp assuming it points to a previously allocated block
-    MetaData old_md = nullptr;
-    for (MetaData md = memory_list; md != nullptr; md = md->next) {
-        if (md->alloc_address == oldp) {
-            old_md = md;
-            break;
-        }
-    }
+    MetaData* old_md = (MetaData*) oldp - 1;
+    MetaData* prev_block = old_md->prev;
+    MetaData* next_block = old_md->next;
 
-    // Check if allocation has enough memory to support the new block size
-    if (old_md->alloc_size >= size) {
+    // Check if old block has enough memory to support the new block size
+    if (old_md->size >= size) {
+        old_md->is_free = false;
         split(old_md, size);
         return oldp;
     }
     
     // If not, check if merging with PREVIOUS block is sufficient 
-    MetaData prev_block = old_md->prev;
     else if (prev_block != nullptr && prev_block->is_free && 
                 prev_block->size + old_md->size + MD_SIZE >= size) {
         // Remove previous block from free histogram and merge with old block
         histRemove(prev_block);
         prev_block->is_free = false;
-        prev_block->alloc_size += old_md->alloc_size + MD_SIZE;
+        prev_block->size += old_md->size + MD_SIZE;
         prev_block->next = old_md->next;
         if (old_md->next != nullptr) {
             old_md->next->prev = prev_block;
         }
         // Copy the data, then split the merged block
-        memmove(prev_block->alloc_address, oldp, old_md->size);
+        memmove(prev_block + 1, oldp, old_md->size);
         split(prev_block, size);
-        return prev_block->alloc_address;
+        return prev_block + 1;
     }
 
     // If not, check if merging with NEXT block is sufficient 
-    MetaData next_block = old_md->next;
     else if (next_block != nullptr && next_block->is_free &&
                 next_block->size + old_md->size + MD_SIZE >= size) {
         // Remove next block from free histogram and merge with old block
         histRemove(next_block);
         next_block->is_free = false;
-        old_md->alloc_size += next_block->alloc_size + MD_SIZE;
+        old_md->size += next_block->size + MD_SIZE;
         old_md->next = next_block->next;
         if (next_block->next != nullptr) {
             next_block->next->prev = old_md;
         }
         // Split the merged block
-        split(prev_block, size);
-        return old_md->alloc_address;
+        split(old_md, size);
+        return old_md + 1;
     }
     
     // If not, check if merging with BOTH adjacent blocks is sufficient 
@@ -405,25 +359,25 @@ void* srealloc(void* oldp, size_t size) {
         histRemove(prev_block);
         histRemove(next_block);
         prev_block->is_free = next_block->is_free = false;
-        prev_block->alloc_size += old_md->alloc_size + next_block->size + 2*MD_SIZE;
+        prev_block->size += old_md->size + next_block->size + 2*MD_SIZE;
         prev_block->next = next_block->next;
         if (next_block->next != nullptr) {
             next_block->next->prev = prev_block;
         }
         // Copy the data, then split the merged block
-        memmove(prev_block->alloc_address, oldp, old_md->size);
+        memmove(prev_block + 1, oldp, old_md->size);
         split(prev_block, size);
-        return prev_block->alloc_address;
+        return prev_block + 1;
     }
 
     // If not, check if reallocation is in wilderness block and enlarge it
     else if (old_md->next == nullptr) {
-        void* enlarge = sbrk(size - old_md->alloc_size);
+        void* enlarge = sbrk(size - old_md->size);
         if (enlarge == (void*)(-1))
             return nullptr;
             
-        old_md->alloc_size = size;
-        return old_md->alloc_address;
+        old_md->size = size;
+        return old_md + 1;
     }
 
     // If not, allocate memory using smalloc
@@ -434,7 +388,8 @@ void* srealloc(void* oldp, size_t size) {
         
         // Copy the data, then free the old memory using sfree
         memmove(realloc_addr, oldp, old_md->size);
-        sfree(oldp);
+        histInsert(old_md);
+        old_md->is_free = true;
         return realloc_addr;
     }
 }
@@ -443,7 +398,7 @@ void* srealloc(void* oldp, size_t size) {
 size_t _num_free_blocks() {
     size_t free_blocks = 0;
     for (int i = 0; i < 128; i++) {
-        MetaData md = histogram[i];
+        MetaData* md = histogram[i];
         while (md != nullptr) {
             free_blocks++;
             md = md->next_free;
@@ -455,9 +410,9 @@ size_t _num_free_blocks() {
 size_t _num_free_bytes() {
     size_t free_bytes = 0;
     for (int i = 0; i < 128; i++) {
-        MetaData md = histogram[i];
+        MetaData* md = histogram[i];
         while (md != nullptr) {
-            free_bytes += md->alloc_size;
+            free_bytes += md->size;
             md = md->next_free;
         }
     }
@@ -467,12 +422,12 @@ size_t _num_free_bytes() {
 size_t _num_allocated_blocks() {
     size_t allocated_blocks = 0;
     if (memory_list) {
-        for (MetaData md = memory_list; md != nullptr; md = md->next) {
+        for (MetaData* md = memory_list; md != nullptr; md = md->next) {
             allocated_blocks++;
         }
     }
     if (mmap_list) {
-        for (MetaData md = mmap_list; md != nullptr; md = md->next) {
+        for (MetaData* md = mmap_list; md != nullptr; md = md->next) {
             allocated_blocks++;
         }
     }
@@ -482,20 +437,20 @@ size_t _num_allocated_blocks() {
 size_t _num_allocated_bytes() {
     size_t allocated_bytes = 0;
     if (memory_list) {
-        for (MetaData md = memory_list; md != nullptr; md = md->next) {
-            allocated_bytes += md->alloc_size;
+        for (MetaData* md = memory_list; md != nullptr; md = md->next) {
+            allocated_bytes += md->size;
         }
     }
     if (mmap_list) {
-        for (MetaData md = mmap_list; md != nullptr; md = md->next) {
-            allocated_bytes += md->alloc_size;
+        for (MetaData* md = mmap_list; md != nullptr; md = md->next) {
+            allocated_bytes += md->size;
         }
     }
     return allocated_bytes;
 }
 
 size_t _size_meta_data() {
-    return sizeof(struct MetaData_t);
+    return sizeof(MetaData);
 }
 
 size_t _num_meta_data_bytes() {
